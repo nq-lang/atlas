@@ -113,3 +113,12 @@ Full `make test` (224 unit + smoke incl. expiry API + 3361 Greek-vs-finite-diffe
 suites green), ASan/TSan `make test-sanitize` clean, backend-restart + soak suite 13/13. Frontend soak 420 s, real Lightweight
 Charts, panning every 5 s: heap 4.2 -> 4.9 MB (sublinear: +0.3 MB in the first 60 s), DOM nodes 1659 -> 1659, listeners 223 -> 223,
 no errors; frame pacing ~16.7 ms idle / pan / zoom. Still not run: multi-hour soak, real-data reconciliation.
+
+### Syntax sweep + heavy-load stress (2026-11-01)
+Syntax: `node --check` on all 14 JS files and every inline script in index.html; `py_compile` on all Python; `bash -n` on all shell;
+all C++ (server + tests) with `-Wall -Wextra -Wpedantic -Werror`: zero findings (.vscode/.devcontainer JSON files are JSONC, comments are valid).
+Stress (`tests/e2e/stress_heavy.py 180 24`): 24 concurrent clients, random mix over all 8 tickers x 6 Greek lenses x 7 expiry selectors
+(incl. current+50, dte:0..6, dte:50), candles, quadrinity and projections, with every JSON body parsed, while a real browser panned,
+zoomed and switched tickers. 677,954 requests (3,766/s), 0 errors; latency p50 5.0 / p95 17.2 / p99 27.4 ms (max 128);
+server RSS 63 -> 69 MB peak, threads and fds flat; browser frames mean 17.3 ms, p95 16.8, one frame >100 ms in 10,666;
+heap 3.5 -> 4.6 MB, DOM and listeners flat; no page errors.
