@@ -122,3 +122,14 @@ Stress (`tests/e2e/stress_heavy.py 180 24`): 24 concurrent clients, random mix o
 zoomed and switched tickers. 677,954 requests (3,766/s), 0 errors; latency p50 5.0 / p95 17.2 / p99 27.4 ms (max 128);
 server RSS 63 -> 69 MB peak, threads and fds flat; browser frames mean 17.3 ms, p95 16.8, one frame >100 ms in 10,666;
 heap 3.5 -> 4.6 MB, DOM and listeners flat; no page errors.
+
+### Final optimization audit (2026-11-08)
+Backend per-request cost (keep-alive, 400 reqs each, p50): heatmap 0.14 ms (0DTE / 7 expiries / GEX+VEX), velocity 0.22 ms, candles 0.17 ms,
+latest candle 0.09 ms, Quadrinity x4 0.23 ms (31 KB), projection 0.15 ms. Nothing there is worth optimizing further; the server sustained
+3,766 req/s on 24 clients with flat RSS/threads/fds.
+Frontend CPU profile (Chrome sampling profiler, 14 s of live ticks + wheel zoom, real Lightweight Charts): 65 % idle, 31 % native
+rasterisation (software-rendered headless), application JavaScript ~2 % of wall time; the largest app function is the orb diamond drawer
+(0.9 %), heatmap render 0.07 %, GC 0.4 %. No remaining hot spot above noise, so no further code changes were made.
+Optimizations already in place: orbs painted in the chart's own render pass (no second canvas pass, 0 px drift), rAF-coalesced updates,
+drawing preview only while armed (idle = zero work), heatmap panels paused when hidden, per-Greek requests (no merged payloads),
+view/gesture persistence without redraw, flat listeners/DOM/heap over 7-minute soak.
