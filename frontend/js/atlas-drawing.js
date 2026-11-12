@@ -81,13 +81,19 @@
 
   function normalize(d) {
     if (!d || !POINTS_NEEDED[d.type] || !d.p1 || !d.p2) return null;
-    return {
+    const out = {
       id: d.id || newId(),
       type: d.type,
       p1: { time: d.p1.time, price: d.p1.price },
       p2: { time: d.p2.time, price: d.p2.price },
       visible: d.visible !== false,   // older saves have no flag => displayed
     };
+    if (d.type === 'long' || d.type === 'short') {
+      // Stop-loss is stored as an absolute price so TP, SL, entry and width are independently adjustable.
+      // Older saves (no `sl`) get the previous default: half of the reward distance on the other side.
+      out.sl = Number.isFinite(d.sl) ? d.sl : computePositionLevels(d.type, out.p1, out.p2).stopLossPrice;
+    }
+    return out;
   }
   function loadFromStorage(ticker) {
     try {
@@ -106,14 +112,15 @@
   const clone = (d) => ({ ...d, p1: { ...d.p1 }, p2: { ...d.p2 } });
 
   // Position-tool maths (unchanged): drag distance = reward; stop = half of it on the other side.
-  function computePositionLevels(type, p1, p2) {
+  function computePositionLevels(type, p1, p2, sl) {
     const rewardDistance = Math.abs(p2.price - p1.price);
-    const riskDistance = rewardDistance * DEFAULT_RISK_FRACTION;
     const isLong = type === 'long';
+    const explicitSl = Number.isFinite(sl);
+    const riskDistance = explicitSl ? Math.abs(p1.price - sl) : rewardDistance * DEFAULT_RISK_FRACTION;
     return {
       entryPrice: p1.price,
       takeProfitPrice: isLong ? p1.price + rewardDistance : p1.price - rewardDistance,
-      stopLossPrice: isLong ? p1.price - riskDistance : p1.price + riskDistance,
+      stopLossPrice: explicitSl ? sl : (isLong ? p1.price - riskDistance : p1.price + riskDistance),
       rewardDistance, riskDistance,
       riskRewardRatio: riskDistance > 0 ? rewardDistance / riskDistance : 0,
     };
@@ -222,6 +229,7 @@
       state.gesture = null;
       toolBtns.forEach((b) => b.classList.toggle('active', b.dataset.tool === id));
       wrapper.classList.toggle('atlas-drawing-armed', id !== 'cursor');
+      wrapper.style.cursor = '';          // hover cursor belongs to idle mode only
       if (id !== 'cursor') { state.selectedId = null; closeModal(); }
       invalidate(DIRTY_PREVIEW | DIRTY_COMMITTED);
     }
@@ -327,10 +335,65 @@
       if (x2 == null || y2 == null) return null;
       if (d.type === 'rect') return { x1, y1, x2, y2, a: { x: x1, y: y1 }, b: { x: x2, y: y2 } };
       if (d.type === 'range') return { x1, y1, x2, y2, a: { x: x1, y: y1 }, b: { x: x2, y: y2 } };
-      const lv = computePositionLevels(d.type, d.p1, d.p2);
+      const lv = computePositionLevels(d.type, d.p1, d.p2, d.sl);
       const entryY = priceToY(lv.entryPrice), tpY = priceToY(lv.takeProfitPrice), slY = priceToY(lv.stopLossPrice);
       if (entryY == null || tpY == null || slY == null) return null;
       return { x1, y1, x2, y2, lv, entryY, tpY, slY, a: { x: x1, y: entryY }, b: { x: x2, y: tpY } };
+    }
+
+    // ------------------------------------------------------------------ pivots
+    // Every drawing exposes named pivots (handles) once selected. A pivot edits ONE aspect of the drawing:
+    //   rect / range : 4 corners + 4 edge midpoints (width, height, or both)
+    //   long / short : entry (start time + entry price), tp (take-profit price), sl (stop-loss price),
+    //                  width (end time / length)
+    //   hline        : price
+    // `sx`/`sy` name the stored point ('p1'|'p2') whose time / price the pivot controls.
+    function handlesOf(d, g) {
+      const H = [];
+      if (d.type === 'hline') {
+        H.push({ id: 'price', x: Math.max(20, view.plotW - 60), y: g.y1, cursor: 'ns-resize', sy: 'p1' });
+      } else if (d.type === 'rect' || d.type === 'range') {
+        const L = g.x1 <= g.x2 ? 'p1' : 'p2', R = L === 'p1' ? 'p2' : 'p1';
+        const T = g.y1 <= g.y2 ? 'p1' : 'p2', B = T === 'p1' ? 'p2' : 'p1';
+        const xl = Math.min(g.x1, g.x2), xr = Math.max(g.x1, g.x2), yt = Math.min(g.y1, g.y2), yb = Math.max(g.y1, g.y2);
+        const xm = (xl + xr) / 2, ym = (yt + yb) / 2;
+        H.push({ id: 'nw', x: xl, y: yt, cursor: 'nwse-resize', sx: L, sy: T }, { id: 'ne', x: xr, y: yt, cursor: 'nesw-resize', sx: R, sy: T },
+               { id: 'sw', x: xl, y: yb, cursor: 'nesw-resize', sx: L, sy: B }, { id: 'se', x: xr, y: yb, cursor: 'nwse-resize', sx: R, sy: B },
+               { id: 'n', x: xm, y: yt, cursor: 'ns-resize', sy: T }, { id: 's', x: xm, y: yb, cursor: 'ns-resize', sy: B },
+               { id: 'w', x: xl, y: ym, cursor: 'ew-resize', sx: L }, { id: 'e', x: xr, y: ym, cursor: 'ew-resize', sx: R });
+      } else {
+        const xl = Math.min(g.x1, g.x2), xr = xl + Math.max(2, Math.abs(g.x2 - g.x1)), xm = (xl + xr) / 2;
+        H.push({ id: 'tp', x: xm, y: g.tpY, cursor: 'ns-resize', color: '34, 197, 94' },
+               { id: 'sl', x: xm, y: g.slY, cursor: 'ns-resize', color: '240, 97, 109' },
+               { id: 'width', x: xr, y: g.entryY, cursor: 'ew-resize' },
+               { id: 'entry', x: xl, y: g.entryY, cursor: 'move' });
+      }
+      return H;
+    }
+    // Apply one pivot drag (pointer snapped to P) to the temp copy `t` of a drawing. Keeps every drawing valid:
+    // position tools can never invert (sl < entry < tp for longs, mirrored for shorts).
+    function applyPivot(t, h, P) {
+      const gap = Math.max(Math.abs(t.p1.price) * 1e-5, 1e-6);
+      if (t.type === 'hline') { t.p1 = { time: t.p1.time, price: P.price }; t.p2 = { ...t.p1 }; return; }
+      if (t.type === 'rect' || t.type === 'range') {
+        if (h.sx) t[h.sx] = { ...t[h.sx], time: P.time };
+        if (h.sy) t[h.sy] = { ...t[h.sy], price: P.price };
+        return;
+      }
+      const isLong = t.type === 'long', lv = computePositionLevels(t.type, t.p1, t.p2, t.sl);
+      if (h.id === 'width') { if (P.time !== t.p1.time) t.p2 = { ...t.p2, time: P.time }; }
+      else if (h.id === 'tp') {
+        const tp = isLong ? Math.max(P.price, lv.entryPrice + gap) : Math.min(P.price, lv.entryPrice - gap);
+        t.p2 = { ...t.p2, price: tp };
+      } else if (h.id === 'sl') {
+        t.sl = isLong ? Math.min(P.price, lv.entryPrice - gap) : Math.max(P.price, lv.entryPrice + gap);
+      } else if (h.id === 'entry') {
+        const lo = isLong ? lv.stopLossPrice + gap : lv.takeProfitPrice + gap, hi = isLong ? lv.takeProfitPrice - gap : lv.stopLossPrice - gap;
+        const price = Math.min(hi, Math.max(lo, P.price));
+        const tp = lv.takeProfitPrice;                 // TP and SL stay where they are (absolute levels)
+        t.p1 = { time: P.time, price };
+        t.p2 = { ...t.p2, price: tp };
+      }
     }
 
     // ----------------------------------------------------------------- painting
@@ -397,6 +460,14 @@
       }
       ctx.setLineDash([]);
     }
+    // Pivots of a SELECTED committed drawing: solid, accent-coloured squares — deliberately unlike the
+    // amber round placement handles, so a selected drawing never looks like a lingering preview.
+    function paintPivot(ctx, h, hot) {
+      const r = hot ? 5.5 : 4.5;
+      ctx.fillStyle = `rgb(${h.color || '94, 189, 255'})`; ctx.strokeStyle = '#0b0d14'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.rect(h.x - r, h.y - r, 2 * r, 2 * r); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1; ctx.strokeRect(h.x - r + 1.5, h.y - r + 1.5, 2 * r - 3, 2 * r - 3);
+    }
     function paintHandle(ctx, x, y, hot) {
       ctx.beginPath(); ctx.arc(x, y, HANDLE_R + (hot ? 1.5 : 0), 0, Math.PI * 2);
       ctx.fillStyle = '#ffffff'; ctx.fill();
@@ -442,7 +513,7 @@
         if (!g) continue;
         const sel = d0.id === state.selectedId;
         paintShape(cctx, d, g, sel ? 'selected' : 'committed');
-        if (sel) { paintHandle(cctx, g.a.x, g.a.y); if (g.b) paintHandle(cctx, g.b.x, g.b.y); }
+        if (sel) { const hh = handlesOf(d, g); for (const h of hh) paintPivot(cctx, h, state.gesture && state.gesture.id === d0.id && state.gesture.handle === h.id); }
       }
       cctx.restore();
     }
@@ -470,8 +541,10 @@
       pctx.clearRect(0, 0, size.w, size.h);
       if (state.tool === 'cursor' && !state.gesture && state.cursor) {
         // Hover feedback (pointer cursor over a drawing) is computed here, once per frame — never in the move handler.
-        const over = drawings().length ? !!hitTest(state.cursor.x, state.cursor.y) : false;
+        const hit = drawings().length ? hitTest(state.cursor.x, state.cursor.y) : null;
+        const over = !!hit;
         if (over !== wrapper.classList.contains('atlas-drawing-hover')) wrapper.classList.toggle('atlas-drawing-hover', over);
+        wrapper.style.cursor = hit ? (hit.mode === 'resize' ? hit.spec.cursor : 'move') : '';
       }
       const s = previewShape();
       lastPreview = null;
@@ -525,9 +598,10 @@
       const sel = state.selectedId && byId(state.selectedId);
       if (sel && sel.visible !== false) {
         const g = geom(sel);
-        if (g) {
-          if (g.b && Math.hypot(x - g.b.x, y - g.b.y) <= HIT_R) return { id: sel.id, mode: 'resize', anchor: 'p2' };
-          if (Math.hypot(x - g.a.x, y - g.a.y) <= HIT_R && sel.type !== 'hline') return { id: sel.id, mode: 'resize', anchor: 'p1' };
+        if (g) {   // nearest pivot within reach wins
+          let best = null, bd = HIT_R + 1;
+          for (const h of handlesOf(sel, g)) { const dd = Math.hypot(x - h.x, y - h.y); if (dd < bd) { bd = dd; best = h; } }
+          if (best) return { id: sel.id, mode: 'resize', handle: best.id, spec: best };
         }
       }
       const list = drawings();
@@ -574,8 +648,8 @@
       e.stopPropagation(); e.preventDefault();
       state.selectedId = hit.id;
       const d = byId(hit.id), g = geom(d);
-      state.gesture = { kind: 'edit', id: hit.id, mode: hit.mode, anchor: hit.anchor, downX: x, downY: y, temp: clone(d),
-                        ax: g.x1, ay: g.y1, bx: g.x2, by: g.y2, moved: false };
+      state.gesture = { kind: 'edit', id: hit.id, mode: hit.mode, handle: hit.handle, spec: hit.spec, downX: x, downY: y, temp: clone(d),
+                        ax: g.x1, ay: g.a.y, bx: g.x2, by: g.b ? g.b.y : g.y2, moved: false };
       invalidate(DIRTY_COMMITTED | DIRTY_PREVIEW);
       refreshList();
     }
@@ -585,6 +659,7 @@
       const x = e.clientX - size.left, y = e.clientY - size.top;
       state.cursor = { x, y };
       const gs = state.gesture;
+      if (gs && e.buttons === 0) { onUp(e); return; }   // the button was released where we could not see it
       if (gs && gs.kind === 'edit') {
         const dx = x - gs.downX, dy = y - gs.downY;
         if (!gs.moved && Math.hypot(dx, dy) < 2) return;
@@ -592,10 +667,14 @@
         const t = gs.temp, src = byId(gs.id);
         const conv = (px, py) => snapPoint(px, py);
         if (gs.mode === 'resize') {
-          const P = conv(x, y); if (P) t[gs.anchor] = P;
+          const P = conv(Math.max(0, Math.min(x, view.plotW - 1)), Math.max(0, Math.min(y, view.plotH - 1)));
+          if (P) applyPivot(t, gs.spec, P);
         } else {
           const A = conv(gs.ax + dx, gs.ay + dy), B = conv(gs.bx + dx, gs.by + dy);
-          if (A && B) { t.p1 = A; t.p2 = src.type === 'hline' ? A : B; }
+          if (A && B) {
+            t.p1 = A; t.p2 = src.type === 'hline' ? A : B;
+            if (Number.isFinite(src.sl)) t.sl = src.sl + (A.price - src.p1.price);   // the whole position moves together
+          }
         }
         invalidate(DIRTY_COMMITTED);
         return;
@@ -605,7 +684,9 @@
 
     function commit(type, p1, p2) {
       const d = { id: newId(), type, p1: { ...p1 }, p2: { ...p2 }, visible: true };
+      if (type === 'long' || type === 'short') d.sl = computePositionLevels(type, d.p1, d.p2).stopLossPrice;
       drawings().push(d);
+      state.selectedId = d.id;          // pivots are available immediately after placing
       persist();
       invalidate(DIRTY_COMMITTED | DIRTY_PREVIEW);
       refreshList();
@@ -619,7 +700,7 @@
       syncOrigin();
       const x = e.clientX - size.left, y = e.clientY - size.top;
       if (gs.kind === 'edit') {
-        if (gs.moved) { const d = byId(gs.id); d.p1 = gs.temp.p1; d.p2 = gs.temp.p2; persist(); }
+        if (gs.moved) { const d = byId(gs.id); d.p1 = gs.temp.p1; d.p2 = gs.temp.p2; if (Number.isFinite(gs.temp.sl)) d.sl = gs.temp.sl; persist(); refreshList(); closeModalIfFor(d.id); }
         invalidate(DIRTY_COMMITTED | DIRTY_PREVIEW);
         return;
       }
@@ -656,6 +737,11 @@
       if (state.placing) { state.placing = null; state.gesture = null; invalidate(DIRTY_PREVIEW); }
       else setTool('cursor');
     }
+    // Window lost focus / pointer interaction cancelled mid-gesture: abandon it cleanly, never leave a ghost.
+    function onAbort() {
+      if (state.gesture && state.gesture.kind === 'edit') { state.gesture = null; invalidate(DIRTY_COMMITTED | DIRTY_PREVIEW); }
+      else if (state.tool !== 'cursor') setTool('cursor');
+    }
     function onLeave() { state.cursor = null; invalidate(DIRTY_PREVIEW); }
     function onDbl(e) {
       if (isUi(e.target) || state.tool !== 'cursor') return;
@@ -672,6 +758,8 @@
     wrapper.addEventListener('contextmenu', onContextMenu, true);
     window.addEventListener('mouseup', onUp, true);
     window.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', onAbort);
+    window.addEventListener('pointercancel', onAbort, true);
 
     // ----------------------------------------------- settings dialog + list UI
     let modalEl = null, listEl = null;
@@ -687,18 +775,20 @@
       refreshList();
     }
 
+    function closeModalIfFor(id) { if (modalEl && modalEl.dataset.id === id) { const m = modalEl; closeModal(); openModal(id); } }
     function closeModal() { if (modalEl) { modalEl.remove(); modalEl = null; } }
     function openModal(id) {
       const d = byId(id); if (!d) return;
       closeModal();
       modalEl = document.createElement('div');
-      modalEl.className = 'atlas-drawing-modal';
+      modalEl.className = 'atlas-drawing-modal'; modalEl.dataset.id = id;
       modalEl.innerHTML = `
         <div class="atlas-drawing-modal-head"><span class="atlas-drawing-modal-title"></span>
           <button class="atlas-drawing-modal-close" title="Close">&times;</button></div>
         <label class="atlas-drawing-switch"><input type="checkbox" class="atlas-drawing-visible-toggle">
           <span class="atlas-drawing-switch-track"></span><span class="atlas-drawing-switch-label"></span></label>
         <div class="atlas-drawing-modal-meta"></div>
+        <div class="atlas-drawing-levels"></div>
         <div class="atlas-drawing-modal-actions"><button class="atlas-drawing-delete">Delete drawing</button></div>`;
       const title = modalEl.querySelector('.atlas-drawing-modal-title');
       const toggle = modalEl.querySelector('.atlas-drawing-visible-toggle');
@@ -711,6 +801,20 @@
         lbl.textContent = toggle.checked ? 'Displayed' : 'Not displayed';
         meta.textContent = `${fmtTime(cur.p1.time)} @ ${cur.p1.price.toFixed(2)}` + (cur.type === 'hline' ? '' : `  →  ${fmtTime(cur.p2.time)} @ ${cur.p2.price.toFixed(2)}`);
       };
+      // Position tools: exact numeric entry / take-profit / stop-loss (validated the same way as dragging a pivot).
+      const lv = modalEl.querySelector('.atlas-drawing-levels');
+      if (d.type === 'long' || d.type === 'short') {
+        lv.innerHTML = ['entry', 'tp', 'sl'].map((k) => `<label>${k.toUpperCase()}<input type="number" step="any" class="atlas-drawing-level" data-k="${k}"></label>`).join('');
+        const fill = () => { const c = byId(id); if (!c) return; const l = computePositionLevels(c.type, c.p1, c.p2, c.sl);
+          lv.querySelector('[data-k=entry]').value = l.entryPrice.toFixed(2); lv.querySelector('[data-k=tp]').value = l.takeProfitPrice.toFixed(2); lv.querySelector('[data-k=sl]').value = l.stopLossPrice.toFixed(2); };
+        fill();
+        lv.querySelectorAll('input').forEach((inp) => inp.addEventListener('change', () => {
+          const c = byId(id), v = parseFloat(inp.value); if (!c || !Number.isFinite(v)) { fill(); return; }
+          const t = clone(c); t.sl = c.sl;
+          applyPivot(t, { id: inp.dataset.k }, { time: c.p1.time, price: v });
+          c.p1 = t.p1; c.p2 = t.p2; c.sl = t.sl; persist(); invalidate(DIRTY_COMMITTED); refreshList(); fill();
+        }));
+      }
       sync();
       toggle.addEventListener('change', () => { setVisible(id, toggle.checked); sync(); });   // applies immediately
       modalEl.querySelector('.atlas-drawing-modal-close').addEventListener('click', closeModal);
@@ -781,6 +885,8 @@
         wrapper.removeEventListener('contextmenu', onContextMenu, true);
         window.removeEventListener('mouseup', onUp, true);
         window.removeEventListener('keydown', onKey, true);
+        window.removeEventListener('blur', onAbort);
+        window.removeEventListener('pointercancel', onAbort, true);
         if (typeof ts.unsubscribeVisibleLogicalRangeChange === 'function') ts.unsubscribeVisibleLogicalRangeChange(onRange);
         closeModal();
         if (listEl) listEl.remove();
@@ -819,6 +925,10 @@
       // Diagnostics (tests, profiling): what the overlay last painted and how often.
       getStats() { return { ...stats }; },
       getPreview() { return lastPreview; },
+      openSettings(id) { state.selectedId = id; invalidate(DIRTY_COMMITTED); openModal(id); },
+      getSelectedId() { return state.selectedId; },
+      select(id) { const d = byId(id); state.selectedId = d && d.visible !== false ? id : null; invalidate(DIRTY_COMMITTED); refreshList(); },
+      getHandles() { refreshView(); const d = state.selectedId && byId(state.selectedId); const g = d && geom(d); return g ? handlesOf(d, g).map((h) => ({ id: h.id, x: h.x, y: h.y })) : []; },
       pixelOf(p) { refreshView(); return { x: timeToX(p.time), y: priceToY(p.price) }; },
       pointAt(x, y) { refreshView(); return snapPoint(x, y); },
     };

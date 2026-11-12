@@ -133,3 +133,16 @@ rasterisation (software-rendered headless), application JavaScript ~2 % of wall 
 Optimizations already in place: orbs painted in the chart's own render pass (no second canvas pass, 0 px drift), rAF-coalesced updates,
 drawing preview only while armed (idle = zero work), heatmap panels paused when hidden, per-Greek requests (no merged payloads),
 view/gesture persistence without redraw, flat listeners/DOM/heap over 7-minute soak.
+
+### Drawings: pivots + post-placement behaviour (2026-11-12)
+* After placing, the tool returns to idle (nothing armed, preview canvas empty) and the new drawing is **selected**, so its pivots are
+  usable immediately; the first drag on empty chart pans it. Selected pivots are solid accent squares (never the amber round placement
+  handles), so a selected drawing cannot be mistaken for a lingering preview.
+* Safety nets against a stuck gesture/ghost: a mouse-move reporting no buttons ends the gesture (released outside the window), window
+  blur / pointercancel abandon any placement or edit, Esc reverts a pivot drag.
+* Pivots: long/short = entry (start + entry price), TP, SL, width; rect/range = 4 corners + 4 edge midpoints; hline = price. Each edits
+  only its own aspect; position tools cannot invert (sl < entry < tp, mirrored for shorts). SL is now stored as an absolute price (older
+  saves migrate to the previous default of half the reward). Body drag moves entry/TP/SL together. Double-click opens settings with
+  exact numeric Entry/TP/SL fields.
+* Tests `pw_drawing_pivots.py` (65 checks, real Lightweight Charts): idle/interactive after every tool, every pivot, clamps, Esc, lost
+  mouseup, blur, migration, numeric entry, 300 drawings (pivot drag p95 16.8 ms), no listener growth over 60 place/delete cycles.
